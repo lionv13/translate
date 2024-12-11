@@ -1,3 +1,19 @@
+from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException
+from selenium.webdriver.common.action_chains import ActionChains
+
+import docx
+import time
+import os
+import re
+import logging
+
+from selenium.common.exceptions import NoSuchElementException, TimeoutException, StaleElementReferenceException
+
 
 
 
@@ -52,3 +68,349 @@ def inloggen():
 
 inloggen()
 ##___________________________________________________________________________________________
+
+
+
+
+# Navigate to the "Surveys" page
+WebDriverWait(driver, 10).until(EC.element_to_be_clickable((By.LINK_TEXT, 'Surveys'))).click()
+driver.find_element(By.XPATH, f"//a[contains(@href, '/en/questionnaires/pigs-indoor')][.//div[text()='Preferred']]").click()
+driver.find_element(By.LINK_TEXT, "Edit").click()
+driver.find_element(By.LINK_TEXT, "Questionnaire").click()
+
+# Define the file path to the Word document
+file_path = '/Users/gast/Documents/biocheck/trabajos/octubre/wetransfer_biocheck-code_2024-03-04_1816/biocheckauto/data/Pigs_4.0_NL.docx'
+##_____________________________________extract information from questionaries
+# Patterns for categories, questions, and help text markers
+CATEGORY_PATTERN = r'^(~|[A-L])\.[ \t]*(.*)'
+ROMAN_QUESTION_PATTERN = r'^\s*[IVXLCDM]+\.\s*(.*)'
+REDIRECT_MSG_PATTERN = r'(Als.*?ga naar vraag [IV0-9]+)'  # Redirect pattern
+NUMERIC_QUESTION_PATTERN = r'^\d+\.[ \t]*(.*)'
+HELP_TEXT_MARKERS = ["m.a.w.", "Bijv.", "Bijvoorbeeld", "bijvoorbeeld", "bijv.", "d.w.z.", "De schone weg", "Een hygiënesluis"]
+
+# Bullet regex pattern to handle multiple bullet types
+BULLET_PATTERN = r'^[\u25A1\u25CB•▪○]+\s*'
+
+def extract_data(file_path):
+    """Extracts categories, questions, answers, and help text from a Word document."""
+    try:
+        doc = docx.Document(file_path)
+    except Exception as e:
+        print(f"Error reading document: {e}")
+        return []
+
+    # Lists to store structured data
+    categories = []
+    current_category = None
+    questions = []
+    current_question = None
+    current_answers = []
+    current_help_text = ""
+    current_redirect =""
+    # Loop through paragraphs in the document
+    for para in doc.paragraphs:
+        text = para.text.strip()
+
+        # Skip empty paragraphs
+        if not text:
+            continue
+
+        # Get font size to determine category or question
+        font_size = None
+        if para.runs and para.runs[0].font.size:
+            font_size = para.runs[0].font.size.pt
+
+        # Check if it's a category based on font size and pattern
+        if font_size == 18 and re.match(CATEGORY_PATTERN, text):
+            # Save the previous question before starting a new category
+            if current_question:
+                questions.append({
+                    'question': current_question,
+                    'answers': current_answers,
+                    'redirect': current_redirect,
+                    'help_text': current_help_text.strip()
+                })
+                current_question = None
+                current_answers = []
+                current_help_text = ""
+                current_redirect =""
+
+            # Save the previous category with its questions
+            if current_category and questions:
+                categories.append({
+                    'category_name': current_category,
+                    'questions': questions
+                })
+                questions = []  # Reset for new category
+
+            # Extract and set the new category name
+            current_category = re.match(CATEGORY_PATTERN, text).group(2)
+            continue
+
+        # Check if it's a question (Roman or numeric)
+        if font_size == 14 and (re.match(ROMAN_QUESTION_PATTERN, text) or re.match(NUMERIC_QUESTION_PATTERN, text)):
+            # Save the previous question before starting a new one
+            if current_question:
+                questions.append({
+                    'question': current_question,
+                    'answers': current_answers,
+                    'redirect': current_redirect,
+                    'help_text': current_help_text.strip()
+                })
+                current_answers = []
+                current_help_text = ""
+                current_redirect =""
+
+            # Extract the question text
+            current_question = re.match(ROMAN_QUESTION_PATTERN, text) or re.match(NUMERIC_QUESTION_PATTERN, text)
+            current_question = current_question.group(1) if current_question else None
+            continue
+
+        # Check if it's an answer with bullet points or list style
+        if para.style.name.startswith('List') or re.match(BULLET_PATTERN, text):
+            answer_text = re.sub(BULLET_PATTERN, '', text).strip()
+            if answer_text:
+                current_answers.append(answer_text)
+            continue
+
+        # Capture help text if markers are found
+        if any(marker in text for marker in HELP_TEXT_MARKERS):
+            current_help_text += f" {text}"
+            continue
+        if any(marker in text for marker in REDIRECT_MSG_PATTERN):
+            current_redirect += f" {text}"
+            continue
+    # Save the last question and category
+    if current_question:
+        questions.append({
+            'question': current_question,
+            'answers': current_answers,
+            'redirect': current_redirect,
+            'help_text': current_help_text.strip()
+        })
+        current_question = None
+        current_answers = []
+        current_help_text = ""
+        current_redirect =""
+
+    if current_category:
+        categories.append({
+            'category_name': current_category,
+            'questions': questions
+        })
+
+    return categories
+
+
+
+# Extract data from the document
+extracted_data = extract_data(file_path)
+ 
+categories= extract_data(file_path)
+
+##__________________________process extracted information 
+def process_items(driver, categories):
+    # Count all category names
+    all_category_names = [category['category_name'] for category in categories]
+    total_categories = len(all_category_names)
+    print(f"Total categories to process: {total_categories}")
+    all_question_names = [question for category in categories for question in category['questions']]
+
+    
+    # Índice global para todas las filas (contando todas las categorías)
+    item_index = 0
+    category_counter = 0# Independent counter for category headers
+    
+    completed_categories = [False] * total_categories  # Track completed categories
+    
+    question_counter = 0
+    # Loop a través de todas las categorías
+    for category_index, category_data in enumerate(categories):
+        category_name = category_data['category_name']
+        questions = category_data['questions']
+        num_questions = len(questions)  # Count the number of questions in the category
+
+        print(f"Processing category {category_index + 1} ({category_name}) with {num_questions} questions.")
+        # Track the completion status of each question
+        completed_questions = [False] * num_questions
+        
+
+        while not all(completed_questions):  # Continue until all questions are processed
+            for question_index, question_data in enumerate(questions):
+                if completed_questions[question_index]:  # Skip if already processed
+                    continue
+
+            try:
+                # Localizar y hacer clic en 'Translate' para el elemento actual
+                translate_link = WebDriverWait(driver, 10).until(
+                    EC.element_to_be_clickable((By.XPATH, f"//tr[td][{item_index + 1}]//a[text()='Translate']"))
+                )
+                translate_link.click()
+                print(f"Clicked 'Translate' for item {item_index + 1}.")
+
+                # Localizar fila en holandés y hacer clic en 'Edit' o 'Add'
+                dutch_row = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.XPATH, "//tr[td//text()[contains(., 'Dutch')]]"))
+                )
+
+                edit_link = dutch_row.find_elements(By.XPATH, ".//a[contains(@href, '/edit') and contains(text(), 'Edit')]")
+                if edit_link:
+                    edit_link[0].click()
+                    print(f"Clicked 'Edit' for Dutch in item {item_index + 1}.")
+                else:
+                    add_link = dutch_row.find_elements(By.XPATH, ".//a[contains(@href, '/add') and contains(text(), 'Add')]")
+                    if add_link:
+                        add_link[0].click()
+                        print(f"Clicked 'Add' for Dutch in item {item_index + 1}.")
+                    else:
+                        print(f"No 'Edit' or 'Add' link found for item {item_index + 1}. Moving to next item...")
+                        item_index += 1
+                        continue
+
+                # fill categories
+                labels = driver.find_elements(By.XPATH, "//label")
+                for label in labels:
+                    label_text = label.text.strip()
+                    input_id = label.get_attribute('for')
+
+                    if not input_id:
+                        continue
+
+                    # Rellenar el nombre de la categoría
+                    if "Category name" in label_text:
+                          # Check if category is already completed
+                        current_category_name = all_category_names[category_counter]
+                        print(f"Filling category name: {current_category_name}")
+
+
+                        category_input = WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.ID, input_id))
+                        )
+                        category_input.clear()
+                        category_input.send_keys(current_category_name)
+                        print(f"Filled category name: {current_category_name}")
+                        # Mark the category as completed
+                        completed_categories[category_counter] = True
+                        print(f"Marked category '{current_category_name}' as completed.")
+
+                        category_counter+=1
+                        # click on 'Save'
+                        save_button = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable(
+                                (By.XPATH, "//div[@data-drupal-selector='edit-actions']//input[@data-drupal-selector='edit-submit' and @value='Save']")
+                            )
+                        )
+                        save_button.click()
+                        print("Clicked 'Save' button.")
+                        time.sleep(2)
+                        # Move to the next item row, regardless of success or failure
+                       
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.LINK_TEXT, "Surveys"))
+                        )
+                        driver.find_element(By.LINK_TEXT, "Surveys").click()
+                        print("Navigated back to 'Surveys'.")
+                        
+                        # Mark the question as completed
+                        
+                        
+                        item_index += 1  # Increment the global item index
+
+
+                   
+                    # In the loop where questions are processed:
+                    elif "Question" in label_text:
+                        current_question_data = all_question_names[question_counter]
+                        question_input = WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.ID, input_id))
+                        )
+                        question_input.clear()
+                        question_input.send_keys(current_question_data['question'])
+                        print(f"Filled question: {current_question_data['question']}")
+                    
+                        # Fill in answers
+                        for i, answer in enumerate(current_question_data['answers']):
+                            try:
+                                answer_input = WebDriverWait(driver, 10).until(
+                                    EC.presence_of_element_located((By.ID, f"edit-field-potential-answers-{i}-value"))
+                                )
+                                answer_input.clear()
+                                answer_input.send_keys(answer)
+                                print(f"Filled answer {i + 1}: {answer}")
+                            except Exception as e:
+                                print(f"Failed to fill answer {i + 1}: {e}")
+                    
+                        # Fill help text if available
+                        if current_question_data['help_text']:
+                            try:
+                                help_text_input = WebDriverWait(driver, 10).until(
+                                    EC.presence_of_element_located((By.ID, "edit-help-0-value"))
+                                )
+                                help_text_input.clear()
+                                help_text_input.send_keys(current_question_data['help_text'])                              
+                                print(f"Filled help text: {current_question_data['help_text']}")
+                            except Exception as e:
+                                print(f"Failed to fill help_text {i + 1}: {e}")
+                        # Fill redirect text if available
+                        elif current_question_data ['redirect']:
+                            try:
+                                redirect_input = WebDriverWait(driver, 10).until(
+                                    EC.presence_of_element_located((By.ID, "edit-redirect-0-value"))
+                                )
+                                redirect_input.clear()
+                                redirect_input.send_keys(current_question_data['redirect'])                              
+                                print(f"Filled help text: {current_question_data['redirect']}")
+                            except Exception as e:
+                                print(f"Failed to fill help_text {i + 1}: {e}")
+                            
+                        question_counter += 1
+
+                      # Hacer clic 'Save'
+                        save_button = WebDriverWait(driver, 10).until(
+                            EC.element_to_be_clickable(
+                                (By.XPATH, "//div[@data-drupal-selector='edit-actions']//input[@data-drupal-selector='edit-submit' and @value='Save']")
+                            )
+                        )
+                        save_button.click()
+                        print("Clicked 'Save' button.")
+                       
+                        
+                        
+                        time.sleep(2)
+                        # Move to the next item row, regardless of success or failure
+                        
+                        WebDriverWait(driver, 10).until(
+                            EC.presence_of_element_located((By.LINK_TEXT, "Surveys"))
+                        )
+                        driver.find_element(By.LINK_TEXT, "Surveys").click()
+                        print("Navigated back to 'Surveys'.")
+                        
+                        
+                    
+                    item_index += 1
+                    print(f"Moving to the next item: {item_index + 1}")
+                            
+                            
+            
+            except (TimeoutException, NoSuchElementException, StaleElementReferenceException) as e:
+                    print(f"Error processing item {item_index + 1}: {e}")
+                    item_index += 1  
+                    
+                    continue
+        
+
+    
+# Run the processing function
+process_items(driver, categories)
+
+
+        
+
+print("Finished processing all items.")
+driver.quit()
+
+
+
+
+
+
