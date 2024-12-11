@@ -1,0 +1,54 @@
+
+
+
+##----------------------------------loggin for windows________________________________________________________
+offsets = 0
+species = 'Pigs indoor'
+status= 'Preferred'
+username = 'klant'
+password = 'klant'
+
+PATH = "C:\Program Files (x86)\chromedriver.exe"
+driver = webdriver.Chrome()
+
+
+def handle_auth_popup_windows():
+    """Handle Basic Authentication pop-up for Windows."""
+    # Append credentials directly in the URL for Basic Authentication
+    auth_url = f"https://{username}:{password}@apitest.biocheckgent.com/en/user/login?destination=/en/dashboard"
+    driver.get(auth_url)
+    logging.info("Handled Basic Auth pop-up by appending credentials to the URL.")
+
+
+
+def credentials():
+    username='lionv13@hotmail.com'
+    password='S@uzalito31.'
+    #input credentials
+    driver.find_element("id", "edit-name").send_keys(username, Keys.TAB, password, Keys.RETURN)
+
+def inloggen():
+    """Main login function."""
+    global driver
+    handle_auth_popup_windows()
+    credentials()
+
+
+
+
+## non-training version remove the # 
+
+
+##def inloggen():
+    # officiele site
+    ##driver.get('https://biocheckgent.com/en/user/login?destination=/en/dashboard')
+
+    # test site
+    # driver.get('https://biocheck.release.entityone.be/en/user/login')
+    # time.sleep(5)
+
+    #input credentials
+   ## driver.find_element("id", "edit-name").send_keys(username, Keys.TAB, password, Keys.RETURN)
+
+inloggen()
+##___________________________________________________________________________________________
