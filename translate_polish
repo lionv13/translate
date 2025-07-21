@@ -1,0 +1,474 @@
+from selenium import webdriver
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.webdriver.support.ui import WebDriverWait, Select
+from selenium.common.exceptions import TimeoutException, StaleElementReferenceException, NoSuchElementException, JavascriptException
+from selenium.webdriver.common.action_chains import ActionChains
+import traceback
+import docx
+from docx.table import Table
+import time
+import os
+import re
+import logging
+import json 
+
+# ------------------------------------ CKEditor Fallback Handler ------------------------------------ #
+def fill_ckeditor5_field(driver, field_id, text, label="", timeout=10):
+    try:
+        editor_div = WebDriverWait(driver, timeout).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, f"#{field_id} + div.ck-editor div.ck-editor__editable"))
+        )
+        driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", editor_div)
+        driver.execute_script("arguments[0].focus();", editor_div)
+
+        escaped_text = json.dumps(text)
+        success = driver.execute_script(f"""
+            let textarea = document.getElementById("{field_id}");
+            let wrapper = textarea.closest(".form-item");
+            if (!wrapper) return false;
+
+            let editable = wrapper.querySelector("div.ck-editor__editable");
+            if (!editable) return false;
+
+            let editorInstance = editable.ckeditorInstance || editable._ckeditorInstance || editable._ckeditor5_instance;
+
+            if (!editorInstance) {{
+                for (let el of document.querySelectorAll("div.ck-editor__editable")) {{
+                    if (el.getAttribute("data-ckeditor5-id")) {{
+                        let instance = el.ckeditorInstance || el._ckeditorInstance || el._ckeditor5_instance;
+                        if (instance && el === editable) {{
+                            instance.setData({escaped_text});
+                            return true;
+                        }}
+                    }}
+                }}
+                return false;
+            }}
+
+            editorInstance.setData({escaped_text});
+            return true;
+        """)
+
+        if success:
+            print(f"✅ Successfully set '{label}' using CKEditor 5 API.")
+        else:
+            print(f"[❌ ERROR] Could not find editor instance for '{field_id}'.")
+
+    except Exception as e:
+        print(f"[❌ ERROR] CKEditor 5 JS setData failed for '{label}': {e}")
+
+
+# ------------------------------------ Fill matrix question ------------------------------------ #
+def fill_matrix_question(driver, question_data):
+    try:
+        # Cambiar tipo a "Matrix" si el selector existe
+        try:
+            select_elem = WebDriverWait(driver, 3).until(
+                EC.presence_of_element_located((By.ID, "edit-type"))
+            )
+            select = Select(select_elem)
+            current_value = select.first_selected_option.text.strip().lower()
+            if "matrix" not in current_value:
+                select.select_by_visible_text("Matrix")
+                print("✅ Set question type to Matrix")
+        except TimeoutException:
+            print("ℹ️ Matrix type selector not found, assuming already set.")
+
+        WebDriverWait(driver, 5).until(
+            EC.presence_of_element_located((By.CSS_SELECTOR, '#edit-field-options-0-value'))
+        )
+        print("✅ Matrix inputs loaded.")
+    except Exception as e:
+        print(f"⚠️ Matrix structure not found: {e}")
+        return
+
+    # Asegurar que haya suficientes inputs para opciones
+    required_options = len(question_data.get("answers", []))
+    existing_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[id^="edit-field-options-"][id$="-value"]')
+    while len(existing_inputs) < required_options:
+        try:
+            add_button = driver.find_element(By.XPATH, "//input[@value='Add another item']")
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", add_button)
+            add_button.click()
+            time.sleep(0.8)
+            existing_inputs = driver.find_elements(By.CSS_SELECTOR, 'input[id^="edit-field-options-"][id$="-value"]')
+        except Exception:
+            print("⚠️ Could not find or click 'Add another item' for options.")
+            break
+
+    # Llenar las opciones (columnas)
+    for i, option in enumerate(question_data.get("answers", [])):
+        try:
+            option_input = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.ID, f'edit-field-options-{i}-value'))
+            )
+            option_input.clear()
+            option_input.send_keys(option)
+            print(f"✅ Set option {i+1}: {option}")
+        except Exception as e:
+            print(f"⚠️ Could not set option {i+1}: {e}")
+
+    # Llenar los enunciados (filas)
+    for j, statement in enumerate(question_data.get("statements", [])):
+        try:
+            statement_input = WebDriverWait(driver, 5).until(
+                EC.presence_of_element_located((By.ID, f'edit-field-statements-{j}-value'))
+            )
+            statement_input.clear()
+            statement_input.send_keys(statement)
+            print(f"✅ Set statement {j+1}: {statement}")
+        except Exception as e:
+            print(f"⚠️ Could not set statement {j+1}: {e}")
+
+    # Establecer "Sempre" como valor por defecto para cada fila
+    try:
+        default_selects = WebDriverWait(driver, 5).until(
+            EC.presence_of_all_elements_located((By.CSS_SELECTOR, 'select[id^="edit-matrix-defaults-"][id$="-value"]'))
+        )
+        for i, select_elem in enumerate(default_selects):
+            try:
+                select = Select(select_elem)
+                for option in select.options:
+                    if 'sempre' in option.text.lower():
+                        select.select_by_visible_text(option.text)
+                        print(f"✅ Set default 'Zawsze' for statement {i+1}")
+                        break
+                else:
+                    print(f"⚠️ 'Sempre' not found in defaults for statement {i+1}")
+            except Exception as e:
+                print(f"⚠️ Could not set default for statement {i+1}: {e}")
+    except Exception as e:
+        print(f"⚠️ Default selects not found: {e}")
+
+
+##----------------------------------loggin
+offsets = 0
+species = 'Pigs indoor'
+status= 'Preferred'
+
+
+PATH = "C:\Program Files (x86)\chromedriver.exe"
+driver = webdriver.Chrome()
+
+
+username_http = 'klant'
+password_http = 'klant'
+
+username_form = 'lionv13@hotmail.com'
+password_form = 'kuwfi3-pAwzeh-qunbax'
+
+driver = webdriver.Chrome()
+
+def inloggen():
+    # Inserta credenciales HTTP básicas en la URL
+    url = f"https://{username_http}:{password_http}@apitest.biocheckgent.com/en/user/login?destination=/en/dashboard"
+    driver.get(url)
+
+    try:
+        name_input = WebDriverWait(driver, 10).until(
+            EC.presence_of_element_located((By.ID, "edit-name"))
+        )
+        name_input.clear()
+        name_input.send_keys(username_form)
+
+        pass_input = driver.find_element(By.ID, "edit-pass")
+        pass_input.clear()
+        pass_input.send_keys(password_form, Keys.RETURN)
+
+        print("✅ Login completo.")
+    except TimeoutException:
+        print("❌ No se encontró el formulario de login.")
+
+
+# ------------------------------------ Login Function ------------------------------------ #
+#def credentials():
+    #username='lionv13@hotmail.com'
+    #password='kuwfi3-pAwzeh-qunbax'
+    #driver.find_element("id", "edit-name").send_keys(username, Keys.TAB, password, Keys.RETURN)
+
+#def inloggen():
+    #driver.get('https://biocheckgent.com/en/user/login?destination=/en/dashboard')
+    #credentials()
+# ------------------------------------ Fill CKEditor fields for matrix-only questions ------------------------------------ #
+def fill_matrix_help_fields(driver, question):
+    if question.get('help_text'):
+        fill_ckeditor5_field(driver, 'edit-help-0-value', question['help_text'], label="Help text (matrix)")
+    if question.get('redirect'):
+        fill_ckeditor5_field(driver, 'edit-conditional-help-0-value', question['redirect'], label="Redirect (matrix)")
+
+# ------------------------------------ Extraer preguntas desde Word ------------------------------------ #
+def extract_data(file_path):
+    CATEGORY_PATTERN = r'^(~|[A-L])\.[ \t]*(.*)'
+    NUMERIC_PATTERN = r'^(\d+)\.[ \t]*(.*)'
+    ROMAN_PATTERN = r'^([IVXLCDM]+)\.[ \t]*(.*)'
+    BULLET_PATTERN = r'^[\u25A1\u25CB•▪○]+\s*'
+    HELP_TEXT_MARKERS = ["Jeżeli","Stado","Strefa","Wszystkie","Śluza","Oddzielny","Kompostowanie","Zakopane",
+                         "*Karmienie","Materiałami","Np.","Plan","Szkolenia","Nie","Świnie","Siatki","W", 
+                         "Cały","Ogrodzenie","Doradca","Niektóre","Tj.","Zwierzęta","Zwykle","Komora:","Pytanie",
+                         "Higienogram","Wyklucza"]
+    HELP_TEXT_COLOR = (118, 113, 113)
+    REDIRECT_MSG_PATTERN = r'(W przypadku.*?należy przejść do pytania [IV0-9]+)'
+
+    doc = docx.Document(file_path)
+    blocks = []
+    for element in doc.element.body:
+        if element.tag.endswith('}p'):
+            blocks.append(docx.text.paragraph.Paragraph(element, doc))
+        elif element.tag.endswith('}tbl'):
+            blocks.append(docx.table.Table(element, doc))
+
+    categories = []
+    questions = []
+    current_category = None
+    current_question = None
+    current_number = None
+    current_answers = []
+    current_help_text = ""
+    current_redirect = ""
+
+    for block in blocks:
+        if isinstance(block, docx.text.paragraph.Paragraph):
+            text = block.text.strip().replace("(wymagane)", "").strip()
+            if not text:
+                continue
+
+            font_size = block.runs[0].font.size.pt if block.runs and block.runs[0].font.size else None
+
+            if font_size == 18 and re.match(CATEGORY_PATTERN, text) and 'glossario' not in text.lower():
+                if current_question:
+                    questions.append({
+                        'question': current_question,
+                        'answers': current_answers,
+                        'redirect': current_redirect,
+                        'help_text': current_help_text.strip(),
+                        'number': current_number
+                    })
+                if current_category is not None:
+                    categories.append({
+                        'category_name': current_category,
+                        'questions': questions
+                    })
+                current_category = re.match(CATEGORY_PATTERN, text).group(2)
+                questions = []
+                current_question = None
+                current_answers = []
+                current_help_text = ""
+                current_redirect = ""
+                continue
+
+            match = re.match(NUMERIC_PATTERN, text) or re.match(ROMAN_PATTERN, text)
+            if font_size == 14 and match:
+                if current_question:
+                    questions.append({
+                        'question': current_question,
+                        'answers': current_answers,
+                        'redirect': current_redirect,
+                        'help_text': current_help_text.strip(),
+                        'number': current_number
+                    })
+                current_question = match.group(2).strip()
+                current_number = match.group(1).strip()
+                current_answers = []
+                current_help_text = ""
+                current_redirect = ""
+                continue
+
+            if block.style.name.startswith('List') or re.match(BULLET_PATTERN, text):
+                answer_text = re.sub(BULLET_PATTERN, '', text).strip()
+                if answer_text:
+                    current_answers.append(answer_text)
+                continue
+
+            for run in block.runs:
+                if run.font.color and run.font.color.rgb:
+                    color = (run.font.color.rgb[0], run.font.color.rgb[1], run.font.color.rgb[2])
+                    if color == HELP_TEXT_COLOR or any(marker in run.text for marker in HELP_TEXT_MARKERS):
+                        current_help_text += f" {text}"
+                        break
+
+            if re.search(REDIRECT_MSG_PATTERN, text):
+                current_redirect += f" {text}"
+                continue
+
+        elif isinstance(block, Table) and current_question:
+            headers = []
+            statements = []
+            for i, row in enumerate(block.rows):
+                cells = [cell.text.strip() for cell in row.cells]
+                if i == 0:
+                    headers = [c for c in cells if c]
+                else:
+                    if any(cells):
+                        statements.append(" - ".join(cells).strip())
+            if headers and statements:
+                questions.append({
+                    'question': current_question,
+                    'answers': headers,
+                    'statements': statements,
+                    'redirect': current_redirect,
+                    'help_text': current_help_text.strip(),
+                    'number': current_number
+                })
+                current_question = None
+                current_answers = []
+                current_help_text = ""
+                current_redirect = ""
+
+    if current_question:
+        questions.append({
+            'question': current_question,
+            'answers': current_answers,
+            'redirect': current_redirect,
+            'help_text': current_help_text.strip(),
+            'number': current_number
+        })
+
+    if current_category and questions:
+        categories.append({
+            'category_name': current_category,
+            'questions': questions
+        })
+
+    return categories
+
+
+inloggen()
+WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.LINK_TEXT, 'Surveys')))
+surveys_link = driver.find_element(By.LINK_TEXT, 'Surveys')
+surveys_link.click()
+driver.find_element(By.XPATH, "//a[contains(@href, '/en/questionnaires/pigs-indoor')][.//div[text()='Preferred']]").click()
+driver.find_element(By.LINK_TEXT, "Edit").click()
+driver.find_element(By.LINK_TEXT, "Questionnaire").click()
+
+file_path = '/Users/gast/Documents/biocheck/trabajos/2025/junio/translations/Pigs_4.0_PL.docx'
+categories = extract_data(file_path)
+
+print("✅ Ready to process translations. Total categories loaded:", len(categories))
+
+# ------------------------------------ Fill CKEditor fields for matrix-only questions ------------------------------------ #
+def fill_matrix_help_fields(driver, question):
+    if question.get('help_text'):
+        fill_ckeditor5_field(driver, 'edit-help-0-value', question['help_text'], label="Help text (matrix)")
+    if question.get('redirect'):
+        fill_ckeditor5_field(driver, 'edit-conditional-help-0-value', question['redirect'], label="Redirect (matrix)")
+
+# ------------------------------------ Procesar preguntas y enviarlas al formulario web ------------------------------------ #
+def process_items(driver, categories):
+    print("🔧 Starting to process items...")
+
+    all_category_names = [cat['category_name'] for cat in categories]
+    all_questions = [q for cat in categories for q in cat['questions']]
+    item_index = 0
+    question_index = 0
+    category_index = 0
+
+    while item_index < len(all_category_names) + len(all_questions):
+        try:
+            print(f"\n🔍 Processing item {item_index + 1}...")
+
+            translate_link = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, f"//tr[td][{item_index + 1}]//a[text()='Translate']"))
+            )
+            try:
+                translate_link.click()
+            except StaleElementReferenceException:
+                translate_link = WebDriverWait(driver, 5).until(
+                    EC.element_to_be_clickable((By.XPATH, f"//tr[td][{item_index + 1}]//a[text()='Translate']"))
+                )
+                translate_link.click()
+
+            row = WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//tr[td//text()[contains(., 'Polish')]]"))
+            )
+
+            edit_links = row.find_elements(By.XPATH, ".//a[contains(@href, '/edit')]")
+            if edit_links:
+                edit_links[0].click()
+                print("✏️ Clicked 'Edit'")
+            else:
+                add_links = row.find_elements(By.XPATH, ".//a[contains(@href, '/add')]")
+                if add_links:
+                    add_links[0].click()
+                    print("➕ Clicked 'Add'")
+                else:
+                    print("⚠️ No edit or add link found, skipping item")
+                    item_index += 1
+                    continue
+
+            WebDriverWait(driver, 10).until(EC.presence_of_element_located((By.TAG_NAME, "form")))
+
+            labels = driver.find_elements(By.XPATH, "//label")
+            for label in labels:
+                label_text = label.text.strip()
+                input_id = label.get_attribute("for")
+                if not input_id:
+                    continue
+
+                if "Category name" in label_text and category_index < len(all_category_names):
+                    field = driver.find_element(By.ID, input_id)
+                    field.clear()
+                    field.send_keys(all_category_names[category_index])
+                    print(f"🏷️ Set category: {all_category_names[category_index]}")
+                    category_index += 1
+
+                if "Question" in label_text and question_index < len(all_questions):
+                    current = all_questions[question_index]
+                    question_text = re.sub(r'^\d+\.\s*', '', current['question'])
+                    field = driver.find_element(By.ID, input_id)
+                    field.clear()
+                    field.send_keys(question_text)
+                    print(f"❓ Set question: {question_text}")
+
+                    if current.get("statements"):
+                        print("📐 Matrix question detected. Filling using fill_matrix_question...")
+                        fill_matrix_question(driver, current)
+                    else:
+                        print("🅰️ Standard question detected. Filling answers...")
+                        for i, ans in enumerate(current.get('answers', [])):
+                            try:
+                                ans_field = driver.find_element(By.ID, f"edit-field-potential-answers-{i}-value")
+                                ans_field.clear()
+                                ans_field.send_keys(ans)
+                                print(f"  🅰️ Answer {i+1}: {ans}")
+                            except Exception as e:
+                                print(f"  ⚠️ Could not set answer {i+1}: {e}")
+
+                    # CKEditor Help Text
+                    if current.get('help_text'):
+                        fill_ckeditor5_field(driver, 'edit-help-0-value', current['help_text'], label="Help text")
+                    else:
+                        fill_ckeditor5_field(driver, 'edit-help-0-value', '', label="Help text (cleared)")
+
+                    # CKEditor Redirect
+                    if current.get('redirect'):
+                        fill_ckeditor5_field(driver, 'edit-conditional-help-0-value', current['redirect'], label="Redirect")
+                    else:
+                        fill_ckeditor5_field(driver, 'edit-conditional-help-0-value', '', label="Redirect (cleared)")
+
+                    question_index += 1
+
+            save_button = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.XPATH, "//input[@type='submit' and @value='Save']"))
+            )
+            save_button.click()
+            print("💾 Clicked Save")
+
+            WebDriverWait(driver, 10).until(
+                EC.presence_of_element_located((By.XPATH, "//a[contains(text(),'Translate')]"))
+            )
+            print("✅ Save confirmed by return to translate list")
+
+            item_index += 1
+
+        except Exception as e:
+            print(f"❌ Error at item {item_index + 1}: {e}")
+            item_index += 1
+            continue
+ 
+process_items(driver, categories)
+print("🎉 Finished processing all translations.")
+
+
+
